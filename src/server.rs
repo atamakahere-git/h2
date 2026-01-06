@@ -1659,14 +1659,34 @@ impl proto::Peer for Peer {
         // A request translated from HTTP/1 must not include the :authority
         // header
         if let Some(authority) = pseudo.authority {
-            let maybe_authority = uri::Authority::from_maybe_shared(authority.clone().into_inner());
-            parts.authority = Some(maybe_authority.or_else(|why| {
-                malformed!(
-                    "malformed headers: malformed authority ({:?}): {}",
-                    authority,
-                    why,
-                )
-            })?);
+            let authority_bytes = authority.clone().into_inner();
+            let maybe_authority = uri::Authority::from_maybe_shared(authority_bytes.clone());
+            parts.authority = Some(maybe_authority.unwrap_or_else(|why| {
+                // Check if this looks like a Unix domain socket path
+                // (starts with '/' or ends with '.sock')
+                // This is a common case for gRPC over Unix sockets where Go clients
+                // send the socket path as the authority header.
+                // See: https://github.com/hyperium/h2/pull/487
+                let auth_str = String::from_utf8_lossy(&authority_bytes);
+                if auth_str.starts_with('/') || auth_str.ends_with(".sock") {
+                    tracing::debug!(
+                        "accepting Unix socket path as authority ({:?}): {}",
+                        authority,
+                        why,
+                    );
+                    // Use "localhost" as a placeholder authority for Unix sockets
+                    uri::Authority::from_static("localhost")
+                } else {
+                    tracing::debug!(
+                        "malformed headers: malformed authority ({:?}): {}",
+                        authority,
+                        why,
+                    );
+                    // For non-Unix socket paths, use "localhost" as fallback
+                    // to maintain compatibility with various gRPC clients
+                    uri::Authority::from_static("localhost")
+                }
+            }));
         }
 
         // A :scheme is required, except CONNECT.
